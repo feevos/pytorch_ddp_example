@@ -36,6 +36,9 @@ class ConvNet(nn.Module):
         out = self.fc(out)
         return out
 
+#from trchprosthesis.metrics.classification_metric import *
+import torchmetrics
+from xlogger import * 
 
 def train(num_epochs):
     dist.init_process_group(backend='nccl')
@@ -47,7 +50,7 @@ def train(num_epochs):
     verbose = dist.get_rank() == 0  # print only on global_rank==0
 
     model = ConvNet().cuda()
-    batch_size = 100
+    batch_size = 64
 
     criterion = nn.CrossEntropyLoss().cuda()
     optimizer = torch.optim.SGD(model.parameters(), 1e-4)
@@ -60,6 +63,17 @@ def train(num_epochs):
     train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size,
                               shuffle=False, num_workers=0, pin_memory=True,
                               sampler=train_sampler)
+
+    test_dataset = MNIST(root='./data', train=False,
+                          transform=transforms.ToTensor(), download=True)
+    test_sampler = DistributedSampler(test_dataset)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size,
+                              shuffle=False, num_workers=0, pin_memory=True,
+                              sampler=test_sampler)
+
+
+    metric =  torchmetrics.Accuracy(task='multiclass',num_classes=10).to(local_rank) # Classification(10).to(local_rank)
+    mylogger = xlogger("validation_std.dat")
 
     start = datetime.now()
     for epoch in range(num_epochs):
@@ -82,6 +96,24 @@ def train(num_epochs):
                 epoch + 1,
                 num_epochs,
                 tot_loss / (i+1)))
+
+        # Evaluation
+        model.eval()
+        for i, (images, labels) in enumerate(test_loader):
+            images = images.cuda(non_blocking=True)
+            labels = labels.cuda(non_blocking=True)
+
+            outputs = model(images)
+            metric(torch.argmax(outputs,-1),labels)
+
+        metric_kwargs = {'acc':metric.compute()}
+        kwargs = {'epoch':epoch}
+        for k,v in metric_kwargs.items():
+            kwargs[k]=v.cpu().numpy() # Pass to cpu and numpy format
+        if verbose:
+            mylogger.write(kwargs)
+
+
     if verbose:
         print("Training completed in: " + str(datetime.now() - start))
 
